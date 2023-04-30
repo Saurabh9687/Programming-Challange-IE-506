@@ -1,0 +1,313 @@
+import pandas as pd
+import matplotlib.pyplot as plt 
+import numpy as np
+
+%matplotlib inline
+
+import numpy as np
+from urllib.request import urlopen
+
+url = 'https://raw.githubusercontent.com/Saurabh9687/Programming-Challange-IE-506/main/multilabel_train_data%20(2).txt'
+
+from sklearn.datasets import load_svmlight_file
+
+with urlopen(url) as f:
+    X, y = load_svmlight_file(f,multilabel=True)
+
+X = X.toarray()
+
+print("Label",y)
+print("Features",X)
+
+num_samples = len(X)
+
+np.random.seed(1000)
+#Create an index array 
+indexarr = np.arange(num_samples) #index array
+np.random.shuffle(indexarr) #shuffle the indices 
+#print('shuffled indices of samples:')
+#print(indexarr)
+
+#Use the samples corresponding to first 80% of indexarr for training 
+num_train = int(0.8*num_samples)
+#Use the remaining 20% samples for testing 
+num_test = num_samples-num_train
+print('num_train: ',num_train, 'num_test: ', num_test)
+
+#Use the first 80% of indexarr to create the train data features and train labels 
+train_X = X[indexarr[0:num_train]]
+train_y = [y[i] for i in indexarr[0:num_train]]
+print('shape of train data features:')
+print(train_X.shape)
+print('shape of train data labels')
+print(np.array(train_y).shape)
+
+#Use remaining 20% of indexarr to create the test data and test labels  
+test_X = X[indexarr[num_train:num_samples]]
+test_y = [y[i] for i in indexarr[num_train:num_samples]]
+print('shape of test data features:')
+print(test_X.shape)
+print('shape of test data labels')
+print(np.array(test_y).shape)
+
+# Compute predictions for multilabel classification
+def compute_predictions(X, dstumps):
+    num_classes = len(dstumps)
+    num_examples = X.shape[0]
+    final_predictions = np.zeros((num_examples, num_classes))
+    
+    for i, ds in enumerate(dstumps):
+        dim = ds['dim']
+        thres = ds['stump_thresh']
+        alpha = ds['alpha_t']
+        sense = ds['sense']
+        predictions = np.zeros(num_examples)
+        
+        if sense == 1:
+            predictions[X[:, dim] > thres] = 1
+        else:
+            predictions[X[:, dim] < thres] = 1
+        
+        final_predictions[:, i] = alpha * predictions
+    
+    return np.argmax(final_predictions, axis=1)
+
+# def compute_predictions(X, dstumps):
+#   final_predictions = np.zeros(X.shape[0])
+#   for ds in dstumps:
+#     dim = ds['dim']
+#     thres = ds['stump_thresh']
+#     alpha = ds['alpha_t']
+#     sense = ds['sense']
+#     #print('inside inference:dim:',dim,'thres:',thres,'alpha:',alpha)
+#     if sense == 1:
+#       predictions = np.array([1 if X[i,dim] > thres else -1 for i in range(X.shape[0])])
+#     else:
+#       predictions = np.array([1 if X[i,dim] < thres else -1 for i in range(X.shape[0])])
+#     final_predictions = np.add(final_predictions, alpha*predictions)
+#   final_predictions = 2*(final_predictions >= 0) - 1
+#   return final_predictions    
+
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import MultiLabelBinarizer
+
+w_all_rounds = []
+w = (1/len(train_X))*np.ones(len(train_X))
+w_all_rounds.append(w)
+
+y_pred = np.zeros(len(train_X))
+max_rounds = 50
+alphas = [] 
+decision_stumps = []
+
+for round in range(1, max_rounds+1):
+  best_dim = -99
+  best_threshold = -99 
+  best_weighted_err_rate = 99.
+  best_sense = -99
+  best_predictions = []
+
+  for dim in range(train_X.shape[1]):
+      samples_feature = train_X[:, dim]
+      sorted_idx = np.argsort(samples_feature)
+
+      for feat in samples_feature[sorted_idx]:
+          predictions_gt = np.array([1 if train_X[i,dim] > feat else -1 for i in range(len(train_X))])
+          weighted_err_rate_gt = np.sum(np.array([0 if np.all(train_y[i] == predictions_gt[i]) else w[i] for i in range(len(train_X))]))/len(train_X)
+
+          predictions_lt = np.array([1 if train_X[i,dim] < feat else -1 for i in range(len(train_X))])
+          weighted_err_rate_lt = np.sum(np.array([0 if np.all(train_y[i] == predictions_lt[i]) else w[i] for i in range(len(train_X))]))/len(train_X)
+
+          weighted_err_rate = min(weighted_err_rate_gt, weighted_err_rate_lt)
+
+          if best_weighted_err_rate > weighted_err_rate:
+              best_weighted_err_rate = weighted_err_rate
+              best_dim = dim
+              best_threshold = feat
+              if weighted_err_rate_gt > weighted_err_rate_lt:
+                  best_predictions = predictions_lt
+                  best_sense = -1
+              else:
+                  best_predictions = predictions_gt
+                  best_sense = 1
+
+  e_t = best_weighted_err_rate
+  alpha_t = 0.5*np.log((1-e_t)/e_t)
+
+  decisionstump = dict()
+  decisionstump['round'] = round
+  decisionstump['e_t'] = e_t
+  decisionstump['alpha_t'] = alpha_t
+  decisionstump['dim'] = best_dim
+  decisionstump['stump_thresh'] = best_threshold
+  decisionstump['sense'] = best_sense
+  decision_stumps.append(decisionstump)
+
+  new_w = np.array([w[i]*np.exp(-alpha_t) if np.all(best_predictions[i]==train_y[i]) else w[i]*np.exp(alpha_t) for i in range(len(train_X))])
+  w = new_w/np.sum(new_w)
+  w_all_rounds.append(w)
+
+  #compute train acc for decision stumps till current round
+  y_pred = compute_predictions(train_X, decision_stumps)
+  # train_acc = accuracy_score(train_y, y_pred,multioutput='uniform_average')
+  mlb = MultiLabelBinarizer()
+  train_y_binary = mlb.fit_transform(train_y)
+  y_pred_seq = [[label] for label in y_pred]
+  y_pred_binary = mlb.transform(y_pred_seq)
+
+  # y_pred_binary = mlb.transform(y_pred)
+
+  # Compute accuracy score on binary arrays
+  train_acc = accuracy_score(train_y_binary, y_pred_binary)
+  print('round:',round,'train acc:',train_acc)
+  print('--------------------------------------------------')
+
+  #move on to next round  
+
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import MultiLabelBinarizer
+  
+w_all_rounds = []
+w = (1/num_train)*np.ones(num_train)
+w_all_rounds.append(w)
+
+y_pred = np.zeros(num_train)
+
+
+alphas = [] 
+decision_stumps = []
+
+max_rounds = 50
+
+for round in np.arange(1,max_rounds+1):
+  best_dim = -99
+  best_threshold = -99 
+  best_weighted_err_rate = 99.
+  best_sense = -99
+  best_predictions = []
+
+  for dim in range(train_X.shape[1]): #pass through all dimensions 
+    #print('dimension:',dim)
+    samples_feature = train_X[:, dim]
+    #print('samples_feature:',samples_feature)
+    sorted_idx = np.argsort(samples_feature)
+    #print('sorted:',samples_feature[sorted_idx])
+
+    for feat in samples_feature[sorted_idx]:
+      #create a decision stump
+      #sense = 1
+      predictions_gt = np.array([1 if train_X[i,dim] > feat else -1 for i in range(train_X.shape[0])])
+      # weighted_err_rate_gt = np.sum(np.array([0 if train_y[i] == predictions_gt[i] else w[i] for i in range(train_X.shape[0])]))/train_X.shape[0]
+      # weighted_err_rate_gt = np.sum(np.array([0 if train_y[i] == predictions_gt[i] else w[i] for i in range(train_X.shape[0])]))/train_X.shape[0]
+      weighted_err_rate_gt = np.sum(np.array([0 if np.all(train_y[i] == predictions_gt[i]) else w[i] for i in range(train_X.shape[0])]))/train_X.shape[0]
+
+
+      
+      #sense = -1
+      predictions_lt = np.array([1 if train_X[i,dim] < feat else -1 for i in range(train_X.shape[0])])
+      # weighted_err_rate_lt = np.sum(np.array([0 if train_y[i] == predictions_lt[i] else w[i] for i in range(train_X.shape[0])]))/train_X.shape[0]
+      weighted_err_rate_lt = np.sum(np.array([0 if np.array_equal(train_y[i], predictions_lt[i]) else w[i] for i in range(train_X.shape[0])]))/train_X.shape[0]
+
+      
+      weighted_err_rate = min(weighted_err_rate_gt,weighted_err_rate_lt)
+      #print('dim:%d threshold:%.6f weighted err rate:%.6f' %(dim, feat, weighted_err_rate))
+      #print('predictions:',predictions)
+      #print('***************************************')
+      if best_weighted_err_rate > weighted_err_rate:
+        best_weighted_err_rate = weighted_err_rate
+        best_dim = dim
+        best_threshold = feat
+        if weighted_err_rate_gt>weighted_err_rate_lt:
+          best_predictions = predictions_lt
+          best_sense = -1
+        else:
+          best_predictions = predictions_gt
+          best_sense = 1
+
+    #print('#####################################')
+  
+
+  #compute alpha_t
+  e_t = best_weighted_err_rate
+  alpha_t = 0.5*np.log((1-e_t)/e_t)
+  print('e_t:',e_t,'alpha_t:',alpha_t)
+
+  #store the best decisionstump and weighted error rate
+  decisionstump = dict()
+  decisionstump['round'] = round
+  decisionstump['e_t'] = e_t
+  decisionstump['alpha_t'] = alpha_t
+  decisionstump['dim'] = best_dim
+  decisionstump['stump_thresh'] = best_threshold
+  decisionstump['sense'] = best_sense
+  
+  decision_stumps.append(decisionstump)
+
+  #update weights
+  # new_w = np.array([w[i]*np.exp(-alpha_t) if best_predictions[i]==train_y[i] else w[i]*np.exp(alpha_t) for i in range(train_X.shape[0])])
+  new_w = np.array([w[i]*np.exp(-alpha_t) if np.all(best_predictions[i]==train_y[i]) else w[i]*np.exp(alpha_t) for i in range(train_X.shape[0])])
+
+
+  #normalize weights
+  w = new_w/np.sum(new_w)
+  #print('w:',w)
+
+  #store weights
+  w_all_rounds.append(w)
+
+  #compute train acc for decision stumps till current round
+  y_pred = compute_predictions(train_X, decision_stumps)
+  # train_acc = accuracy_score(train_y, y_pred,multioutput='uniform_average')
+  mlb = MultiLabelBinarizer()
+  train_y_binary = mlb.fit_transform(train_y)
+  y_pred_seq = [[label] for label in y_pred]
+  y_pred_binary = mlb.transform(y_pred_seq)
+
+  # y_pred_binary = mlb.transform(y_pred)
+
+  # Compute accuracy score on binary arrays
+  train_acc = accuracy_score(train_y_binary, y_pred_binary)
+  print('round:',round,'train acc:',train_acc)
+  print('--------------------------------------------------')
+
+  #move on to next round  
+
+import seaborn as sns
+ax = sns.heatmap(w_all_rounds)
+
+y_pred = compute_predictions(test_X, decision_stumps)
+train_acc = accuracy_score(test_y, y_pred)
+print('test acc:',train_acc)
+
+# create a mesh to plot in
+h=0.02 #mesh step size
+x1_min, x1_max = X[:, 0].min() - 1, X[:, 0].max() + 1
+x2_min, x2_max = X[:, 1].min() - 1, X[:, 1].max() + 1
+xx1, xx2 = np.meshgrid(np.arange(x1_min, x1_max, h),
+                     np.arange(x2_min, x2_max, h))
+
+testX = np.c_[xx1.ravel(), xx2.ravel()]
+#print(testX.shape) 
+Z = compute_predictions(testX, decision_stumps)
+
+# Put the result into a color plot
+Z = Z.reshape(xx1.shape)
+plt.contourf(xx1, xx2, Z, cmap=plt.cm.coolwarm, alpha=0.8)
+
+# Plot also the training points
+#plt.scatter(X[:, 0], X[:, 1], c=y, cmap=plt.cm.coolwarm)
+
+idx_p = np.where(train_y == 1)
+idx_n = np.where(train_y == -1)
+
+plt.scatter(train_X[idx_p,0],train_X[idx_p,1], marker='o', color='red')
+plt.scatter(train_X[idx_n,0],train_X[idx_n,1], marker='s', color='blue')
+
+plt.xlabel('x1')
+plt.ylabel('x2')
+plt.xlim(xx1.min(), xx1.max())
+plt.ylim(xx2.min(), xx2.max())
+plt.xticks(())
+plt.yticks(())
+plt.title('Decision boundary from AdaBoost')
+plt.show()
